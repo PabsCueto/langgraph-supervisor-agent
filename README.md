@@ -78,4 +78,3 @@ Pablo Cueto Gatica, Python backend developer based in Mexico City. Related proje
 ## License
 
 MIT. See [LICENSE](LICENSE).
-# langgraph-supervisor-agent
