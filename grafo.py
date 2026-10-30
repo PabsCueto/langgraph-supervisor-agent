@@ -131,20 +131,59 @@ def requiere_consulta(messages) -> bool:
     return bool(menciona) and not hubo_herramienta
 
 
+def hay_resultados_recientes(messages) -> bool:
+    """True si ya hubo resultados de herramientas después del último mensaje del usuario."""
+    indices = [i for i, m in enumerate(messages) if m.type == "human"]
+    if not indices:
+        return False
+    return any(m.type == "tool" for m in messages[indices[-1] + 1:])
+
+
+def resumen_de_resultados(messages) -> str:
+    """Respuesta de respaldo que usa solo los datos devueltos por las herramientas."""
+    indices = [i for i, m in enumerate(messages) if m.type == "human"]
+    resultados = [m.content for m in messages[indices[-1] + 1:] if m.type == "tool"]
+    return "Resultados: " + "; ".join(resultados)
+
+
 def supervisor(state: Estado):
     if state["pasos"] >= MAX_PASOS:
         return {
             "siguiente": "FIN",
             "messages": [AIMessage(content="Me quedé sin pasos antes de terminar.")],
         }
+    # Guardia: una respuesta vacía del modelo (sin texto ni llamada a herramienta)
+    # no debe alimentar otra vuelta. Terminamos con un mensaje honesto.
+    ultimo = state["messages"][-1]
+    if ultimo.type == "ai" and not getattr(ultimo, "tool_calls", None) and not ultimo.content:
+        return {
+            "siguiente": "FIN",
+            "messages": [AIMessage(content="No pude completar la consulta con las herramientas. Intenta de nuevo con una pregunta más concreta.")],
+        }
+
     if requiere_consulta(state["messages"]):
         return {"siguiente": "investigador", "pasos": state["pasos"] + 1}
+    consulto = hay_resultados_recientes(state["messages"])
+    prompt = PROMPT_SUPERVISOR
+    if consulto:
+        prompt += (
+            "\n\nYa tienes resultados de herramientas para la pregunta actual. "
+            "No pidas más investigación: elige 'operador' si hay que abrir un ticket, "
+            "o 'FIN' con la respuesta basada en esos resultados."
+        )
     decision = llm.with_structured_output(Decision).invoke(
-        [SystemMessage(content=PROMPT_SUPERVISOR)] + state["messages"]
+        [SystemMessage(content=prompt)] + state["messages"]
     )
-    update = {"siguiente": decision.siguiente, "pasos": state["pasos"] + 1}
-    if decision.siguiente == "FIN":
-        update["messages"] = [AIMessage(content=decision.respuesta)]
+    siguiente, respuesta = decision.siguiente, decision.respuesta
+
+    # Guardrail en código: con datos ya obtenidos, no se permite otra vuelta de investigación.
+    if consulto and siguiente == "investigador":
+        siguiente = "FIN"
+        respuesta = resumen_de_resultados(state["messages"])
+
+    update = {"siguiente": siguiente, "pasos": state["pasos"] + 1}
+    if siguiente == "FIN":
+        update["messages"] = [AIMessage(content=respuesta)]
     return update
 
 
